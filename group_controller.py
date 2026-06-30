@@ -4,6 +4,7 @@ class BroadcastTargetGroup:
         return {
             "required": {
                 "target_group": (["No Valid Target Groups"],),
+                "current_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "lock_seed": ("BOOLEAN", {"default": False, "label_on": "Locked", "label_off": "Random"}),
                 "master_prompt": ("STRING", {"multiline": True, "default": ""})
             }
@@ -43,12 +44,12 @@ class BroadcastedSeed:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}) 
+                "int_value": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}) 
             }
         }
     RETURN_TYPES = ("INT",)
     FUNCTION = "process"
     CATEGORY = "Utility"
 
-    def process(self, seed):
-        return (seed,)
+    def process(self, int_value):
+        return (int_value,)

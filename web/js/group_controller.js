@@ -33,7 +33,7 @@ function getNodesInGroup(group) {
     });
 }
 
-// --- VALIDATE GROUPS (Must have at least ONE of the Helper Nodes) ---
+// --- VALIDATE GROUPS (Must have at least ONE Helper Node) ---
 function getValidGroups() {
     const rootGraph = app.graph?.rootGraph || app.graph;
     const allGroups = getAllGroupsInGraph(rootGraph);
@@ -45,18 +45,28 @@ function getValidGroups() {
     return validGroups;
 }
 
-// --- SAFELY PUSH TEXT TO HELPER NODE ---
-function setWidgetText(node, widget, text) {
+// --- SAFELY PUSH VALUES TO WIDGETS ---
+function setWidgetValue(node, widget, value) {
     if (!node || !widget) return;
-    const valStr = String(text || "");
-    if (widget.value !== valStr) {
-        widget.value = valStr;
+    if (widget.value !== value) {
+        widget.value = value;
         const wIdx = node.widgets.indexOf(widget);
         if (node.widgets_values && wIdx > -1) {
-            node.widgets_values[wIdx] = valStr;
+            node.widgets_values[wIdx] = value;
         }
-        if (widget.inputEl) widget.inputEl.value = valStr;
-        if (widget.element) widget.element.value = valStr;
+        if (widget.inputEl) widget.inputEl.value = value;
+        if (widget.element) widget.element.value = value;
+    }
+}
+
+// --- DYNAMICALLY ENABLE/DISABLE WIDGETS ---
+function setWidgetEnabled(widget, isEnabled) {
+    if (!widget) return;
+    widget.disabled = !isEnabled;
+    if (widget.inputEl) {
+        widget.inputEl.disabled = !isEnabled;
+        widget.inputEl.style.opacity = isEnabled ? "1" : "0.4"; 
+        widget.inputEl.style.cursor = isEnabled ? "text" : "not-allowed";
     }
 }
 
@@ -81,25 +91,46 @@ const controllerManager = {
         
         const combo = node.widgets.find(w => w.name === "target_group");
         const promptBox = node.widgets.find(w => w.name === "master_prompt");
+        const seedBox = node.widgets.find(w => w.name === "current_seed");
 
         if (promptBox && !promptBox._patched) {
             const origCb = promptBox.callback;
             promptBox.callback = function(val) {
+                if (promptBox.disabled) return; 
                 if (origCb) origCb.apply(this, [val]);
                 
                 const targetGroup = combo.value;
                 const groups = getValidGroups();
                 const activeGroup = groups.find(g => (g.title || "").trim() === targetGroup);
-                
                 if (activeGroup) {
                     const promptReceiver = getNodesInGroup(activeGroup).find(n => n.type === "BroadcastedPrompt");
                     if (promptReceiver) {
                         const rWidget = promptReceiver.widgets.find(w => w.name === "text");
-                        setWidgetText(promptReceiver, rWidget, val);
+                        setWidgetValue(promptReceiver, rWidget, val);
                     }
                 }
             };
             promptBox._patched = true;
+        }
+
+        if (seedBox && !seedBox._patched) {
+            const origCb = seedBox.callback;
+            seedBox.callback = function(val) {
+                if (seedBox.disabled) return; 
+                if (origCb) origCb.apply(this, [val]);
+                
+                const targetGroup = combo.value;
+                const groups = getValidGroups();
+                const activeGroup = groups.find(g => (g.title || "").trim() === targetGroup);
+                if (activeGroup) {
+                    const seedReceivers = getNodesInGroup(activeGroup).filter(n => n.type === "BroadcastedSeed");
+                    seedReceivers.forEach(receiver => {
+                        const rWidget = receiver.widgets?.find(w => w.name === "int_value");
+                        setWidgetValue(receiver, rWidget, val);
+                    });
+                }
+            };
+            seedBox._patched = true;
         }
         
         if (combo && !combo._patched) {
@@ -118,6 +149,7 @@ const controllerManager = {
         let combo = node.widgets.find(w => w.name === "target_group");
         let lock = node.widgets.find(w => w.name === "lock_seed");
         let promptBox = node.widgets.find(w => w.name === "master_prompt");
+        let seedBox = node.widgets.find(w => w.name === "current_seed");
 
         if (!combo || !lock || !promptBox) return;
 
@@ -130,35 +162,42 @@ const controllerManager = {
         if (!groupTitles.includes(combo.value)) combo.value = groupTitles[0];
 
         const currentTarget = combo.value;
-
-        // SEEDS
-        validGroups.forEach(g => {
-            const isTarget = (g.title || "").trim() === currentTarget;
-            const seedReceivers = getNodesInGroup(g).filter(n => n.type === "BroadcastedSeed");
-            
-            seedReceivers.forEach(sr => {
-                const ctrl = sr.widgets?.find(w => w.name && w.name.includes("control") && w.name.includes("generate"));
-                if (ctrl) {
-                    ctrl.value = isTarget ? (lock.value ? "fixed" : "randomize") : "fixed";
-                }
-            });
-        });
-
-        // TEXT
         const activeGroupObj = validGroups.find(g => (g.title || "").trim() === currentTarget);
+
+        let hasPromptNode = false;
+        let hasSeedNode = false;
+
+        // SYNC VALUES & DETERMINE WIDGET AVAILABILITY
         if (activeGroupObj) {
-            const promptReceiver = getNodesInGroup(activeGroupObj).find(n => n.type === "BroadcastedPrompt");
+            const groupNodes = getNodesInGroup(activeGroupObj);
+            
+            const promptReceiver = groupNodes.find(n => n.type === "BroadcastedPrompt");
             if (promptReceiver) {
+                hasPromptNode = true;
                 const rWidget = promptReceiver.widgets?.find(w => w.name === "text");
-                if (rWidget) {
-                    setWidgetText(node, promptBox, rWidget.value || "");
+                if (rWidget) setWidgetValue(node, promptBox, rWidget.value || "");
+            }
+
+            const seedReceiver = groupNodes.find(n => n.type === "BroadcastedSeed");
+            if (seedReceiver) {
+                hasSeedNode = true;
+                const rWidget = seedReceiver.widgets?.find(w => w.name === "int_value");
+                if (rWidget && rWidget.value !== undefined) {
+                    setWidgetValue(node, seedBox, rWidget.value);
                 }
-            } else {
-                setWidgetText(node, promptBox, "");
             }
         }
 
-        // MUTING
+        // CLEAR VALUES IF NO RECEIVER EXISTS
+        if (!hasPromptNode) setWidgetValue(node, promptBox, "");
+        if (!hasSeedNode && seedBox) setWidgetValue(node, seedBox, 0);
+
+        // ENABLE OR DISABLE WIDGETS DYNAMICALLY
+        setWidgetEnabled(promptBox, hasPromptNode);
+        setWidgetEnabled(seedBox, hasSeedNode);
+        setWidgetEnabled(lock, hasSeedNode);
+
+        // MUTING LOGIC
         const activeIdx = validGroups.findIndex(g => (g.title || "").trim() === currentTarget);
         for (let i = 0; i < validGroups.length; i++) {
             const g = validGroups[i];
@@ -167,9 +206,46 @@ const controllerManager = {
                 if (n) n.mode = (activeIdx === -1 || i <= activeIdx) ? 0 : 4; 
             });
         }
+    },
+
+    // --- INJECT OR SYNC SEEDS ON QUEUE ---
+    injectSeedsBeforeGeneration() {
+        this.nodes.forEach(controllerNode => {
+            if (!controllerNode.widgets) return;
+            const combo = controllerNode.widgets.find(w => w.name === "target_group");
+            const lock = controllerNode.widgets.find(w => w.name === "lock_seed");
+            const seedBox = controllerNode.widgets.find(w => w.name === "current_seed");
+            
+            // If the seed section is disabled or locked, do nothing
+            if (!combo || !lock || lock.disabled || lock.value === true) return;
+
+            const validGroups = getValidGroups();
+            const activeGroup = validGroups.find(g => (g.title || "").trim() === combo.value);
+            
+            if (activeGroup) {
+                const seedReceivers = getNodesInGroup(activeGroup).filter(n => n.type === "BroadcastedSeed");
+                
+                let seedToUse = seedBox ? seedBox.value : 0;
+
+                // Generate new random seed and show it in our UI box!
+                seedToUse = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+                if (seedBox) {
+                    setWidgetValue(controllerNode, seedBox, seedToUse);
+                }
+
+                // Push whatever seed we settled on to the target receiver nodes
+                seedReceivers.forEach(receiver => {
+                    const widget = receiver.widgets?.find(w => w.name === "int_value");
+                    if (widget) {
+                        setWidgetValue(receiver, widget, seedToUse);
+                    }
+                });
+            }
+        });
     }
 };
 
+// Polling for UI updates
 setInterval(() => {
     if (!app.graph || controllerManager.nodes.size === 0) return;
     
@@ -193,13 +269,31 @@ setInterval(() => {
 
 app.registerExtension({
     name: "utility.group.controller",
+    
+    setup() {
+        const origQueuePrompt = app.queuePrompt;
+        app.queuePrompt = async function() {
+            controllerManager.injectSeedsBeforeGeneration();
+            return origQueuePrompt.apply(this, arguments);
+        };
+    },
+
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name === "BroadcastTargetGroup") {
             const origCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 if (origCreated) origCreated.apply(this, arguments);
+                
+                // --- NEW: Remove connection pins for UI-only widgets ---
+                const pinsToRemove = ["target_group", "lock_seed", "current_seed"];
+                pinsToRemove.forEach(pinName => {
+                    const idx = this.findInputSlot(pinName);
+                    if (idx > -1) this.removeInput(idx);
+                });
+
                 controllerManager.registerNode(this);
             };
+            
             const origRemoved = nodeType.prototype.onRemoved;
             nodeType.prototype.onRemoved = function () {
                 if (origRemoved) origRemoved.apply(this, arguments);
