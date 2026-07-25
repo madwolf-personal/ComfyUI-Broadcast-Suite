@@ -45,6 +45,28 @@ function getValidGroups() {
     return validGroups;
 }
 
+// --- READ VALUE FROM AN UPSTREAM NODE CONNECTED TO A WIDGET-INPUT ---
+function getConnectedInputValue(node, widget) {
+    if (!node || !widget || !node.inputs) return undefined;
+    const input = node.inputs.find(i => i.name === widget.name || i.widget?.name === widget.name);
+    if (!input || input.link == null) return undefined;
+
+    const graph = node.graph || app.graph;
+    const link = graph?.links?.[input.link];
+    if (!link) return undefined;
+
+    const originNode = graph.getNodeById(link.origin_id);
+    if (!originNode || !originNode.widgets) return undefined;
+
+    // Try common widget names first, then fall back to the first widget
+    const candidateNames = ["text", "value", "string", widget.name];
+    for (const name of candidateNames) {
+        const w = originNode.widgets.find(w => w.name === name);
+        if (w) return w.value;
+    }
+    return originNode.widgets[0]?.value;
+}
+
 // --- SAFELY PUSH VALUES TO WIDGETS ---
 function setWidgetValue(node, widget, value) {
     if (!node || !widget) return;
@@ -86,6 +108,22 @@ const controllerManager = {
         if (node) this.nodes.delete(node);
     },
 
+    // --- PUSH A PROMPT VALUE TO THE ACTIVE GROUP'S RECEIVER NODE ---
+    pushPromptToReceiver(node, val) {
+        const combo = node.widgets.find(w => w.name === "target_group");
+        if (!combo) return;
+        const targetGroup = combo.value;
+        const groups = getValidGroups();
+        const activeGroup = groups.find(g => (g.title || "").trim() === targetGroup);
+        if (activeGroup) {
+            const promptReceiver = getNodesInGroup(activeGroup).find(n => n.type === "BroadcastedPrompt");
+            if (promptReceiver) {
+                const rWidget = promptReceiver.widgets.find(w => w.name === "text");
+                setWidgetValue(promptReceiver, rWidget, val);
+            }
+        }
+    },
+
     setupNode(node) {
         if (!node || !node.widgets) return;
         
@@ -98,17 +136,7 @@ const controllerManager = {
             promptBox.callback = function(val) {
                 if (promptBox.disabled) return; 
                 if (origCb) origCb.apply(this, [val]);
-                
-                const targetGroup = combo.value;
-                const groups = getValidGroups();
-                const activeGroup = groups.find(g => (g.title || "").trim() === targetGroup);
-                if (activeGroup) {
-                    const promptReceiver = getNodesInGroup(activeGroup).find(n => n.type === "BroadcastedPrompt");
-                    if (promptReceiver) {
-                        const rWidget = promptReceiver.widgets.find(w => w.name === "text");
-                        setWidgetValue(promptReceiver, rWidget, val);
-                    }
-                }
+                controllerManager.pushPromptToReceiver(node, val);
             };
             promptBox._patched = true;
         }
@@ -263,6 +291,17 @@ setInterval(() => {
         if (node._lastHash !== hash) {
             node._lastHash = hash;
             controllerManager.rebuildUI(node);
+        }
+
+        // --- CHECK FOR AN UPSTREAM-CONNECTED master_prompt VALUE ---
+        const promptBox = node.widgets?.find(w => w.name === "master_prompt");
+        if (promptBox && !promptBox.disabled) {
+            const upstreamVal = getConnectedInputValue(node, promptBox);
+            if (upstreamVal !== undefined && upstreamVal !== node._lastUpstreamPromptValue) {
+                node._lastUpstreamPromptValue = upstreamVal;
+                setWidgetValue(node, promptBox, upstreamVal);
+                controllerManager.pushPromptToReceiver(node, upstreamVal);
+            }
         }
     });
 }, 600);
